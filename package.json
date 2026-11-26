@@ -1,0 +1,9 @@
+{
+  "name": "codex-session-monitor-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare-site": "node scripts/prepare-site.mjs"
+  }
+}
