@@ -20,13 +20,12 @@ import urllib.error
 import urllib.request
 import webbrowser
 
-from runtime_paths import APP, CODEX_HOME, LOCAL_DASHBOARD_OFF, codex_binary, mac_gui, runtime_dir
+from runtime_paths import APP, CODEX_HOME, LOCAL_DASHBOARD_OFF, mac_gui, runtime_dir
 from site_metrics import CONNECTION, SYNC_STATUS, connect, read_connection
 
 
 RUNTIME = runtime_dir()
 CONFIG = CODEX_HOME / "config.toml"
-CAPTURE = str(APP / "codex-capture")
 LAUNCH_AGENT = "com.local.codex-session-monitor"
 SYSTEMD_UNIT = "codex-session-monitor.service"
 PORT = 8765
@@ -154,7 +153,7 @@ def run_collector(codex_home, data_dir, register_capture):
             stop(data_dir)
             if register_capture:
                 try:
-                    enable_capture()
+                    restore_mac_cli()
                 except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                     print(error, file=log)
             try:
@@ -174,14 +173,15 @@ def enable_autostart():
         folder = Path.home() / "Library" / "LaunchAgents"
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         plist = folder / f"{LAUNCH_AGENT}.plist"
-        atomic_write(plist, plistlib.dumps({
-            "Label": LAUNCH_AGENT, "ProgramArguments": [*args, "--register-capture"],
-            "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
-            "Umask": 0o077, "WorkingDirectory": str(APP),
-        }), 0o600)
         service = f"{domain}/{LAUNCH_AGENT}"
         if subprocess.run([launchctl, "print", service], capture_output=True).returncode == 0:
             subprocess.run([launchctl, "bootout", service], check=True)
+        restore_mac_cli()
+        atomic_write(plist, plistlib.dumps({
+            "Label": LAUNCH_AGENT, "ProgramArguments": args,
+            "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
+            "Umask": 0o077, "WorkingDirectory": str(APP),
+        }), 0o600)
         stop()
         subprocess.run([launchctl, "enable", service], check=True)
         subprocess.run([launchctl, "bootstrap", domain, str(plist)], check=True)
@@ -274,24 +274,40 @@ def disconnect():
     print("수집기 설정을 제거했습니다. Codex를 재시작하면 내보내기가 중지됩니다.")
 
 
-def capture_override():
+def is_monitor_launcher(value):
+    if not value:
+        return False
+    path = Path(value)
+    if not path.is_absolute() or path.name != "codex-capture":
+        return False
+    bundled = APP / "codex-capture"
+    if path in (bundled, RUNTIME.resolve() / "app" / "codex-capture"):
+        return True
+    try:
+        # Upgrades can use a different directory from the original installation.
+        if path.is_file():
+            return (path.stat().st_size == bundled.stat().st_size
+                    and path.read_bytes() == bundled.read_bytes())
+        plist = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT}.plist"
+        previous = plistlib.loads(plist.read_bytes())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+    if isinstance(previous, dict) and previous.get("Label") == LAUNCH_AGENT:
+        args = previous.get("ProgramArguments")
+        return (isinstance(args, list) and "--register-capture" in args
+                and str(path.parent / "manage.py") in args)
+    return False
+
+
+def restore_mac_cli():
     if sys.platform != "darwin":
-        return ""
+        return
     result = subprocess.run(
         ["/bin/launchctl", "getenv", "CODEX_CLI_PATH"], capture_output=True, text=True, check=False,
     )
-    return result.stdout.rstrip("\n")
-
-
-def enable_capture():
-    if sys.platform != "darwin":
-        raise RuntimeError("macOS에서 사용하는 명령입니다. 이 장비의 실행 안내를 확인하세요.")
-    if capture_override() not in ("", CAPTURE):
-        raise RuntimeError("이 로그인 세션에 이미 다른 Codex 실행 경로가 설정되어 있습니다.")
-    subprocess.run(["/bin/launchctl", "setenv", "CODEX_CLI_PATH", CAPTURE], check=True)
-    if capture_override() != CAPTURE:
-        raise RuntimeError("이 로그인 세션에 Codex 수집기를 등록하지 못했습니다.")
-    print("이 로그인 세션에서 다음 Codex 시작부터 응답 모델을 수집합니다.")
+    if is_monitor_launcher(result.stdout.rstrip("\n")):
+        subprocess.run(["/bin/launchctl", "unsetenv", "CODEX_CLI_PATH"], check=True)
+        print("이전 수집기가 등록한 Codex 실행 경로를 해제했습니다.")
 
 
 def launch_codex():
@@ -300,12 +316,12 @@ def launch_codex():
     app = mac_gui()
     if app is None:
         raise RuntimeError("Codex GUI의 앱 번들 경로를 CODEX_MONITOR_MAC_APP에 지정하세요.")
-    binary = codex_binary()
+    restore_mac_cli()
     start(False)
-    subprocess.run(
-        ["/usr/bin/open", "-a", str(app), "--env", f"CODEX_CLI_PATH={CAPTURE}",
-         "--env", f"CODEX_MONITOR_REAL_CODEX={binary}"], check=True,
-    )
+    env = os.environ.copy()
+    if is_monitor_launcher(env.get("CODEX_CLI_PATH")):
+        del env["CODEX_CLI_PATH"]
+    subprocess.run(["/usr/bin/open", "-a", str(app)], env=env, check=True)
 
 
 def main():
@@ -316,7 +332,7 @@ def main():
     run_command = choices.add_parser("run")
     run_command.add_argument("--codex-home", type=Path, default=CODEX_HOME)
     run_command.add_argument("--data-dir", type=Path, default=RUNTIME)
-    run_command.add_argument("--register-capture", action="store_true")
+    run_command.add_argument("--register-capture", action="store_true", help=argparse.SUPPRESS)
     choices.add_parser("enable-autostart")
     dashboard = choices.add_parser("local-dashboard")
     dashboard.add_argument("state", choices=("on", "off"))
@@ -348,16 +364,19 @@ def main():
                 marker.unlink(missing_ok=True)
             print(f"로컬 대시보드 {args.state.upper()}")
         elif args.operation == "configure":
+            restore_mac_cli()
             start(False)
             configure()
         elif args.operation == "disconnect":
             disconnect()
-            if capture_override() == CAPTURE:
-                subprocess.run(["/bin/launchctl", "unsetenv", "CODEX_CLI_PATH"], check=True)
+            restore_mac_cli()
         elif args.operation == "stop":
             stop()
         elif args.operation == "enable-model-capture":
-            enable_capture()
+            if sys.platform != "darwin":
+                raise RuntimeError("이 장비의 운영체제 설치 안내를 확인하세요.")
+            restore_mac_cli()
+            print("macOS에서는 기본 Codex 앱을 열면 수집기가 Codex의 측정 기록을 읽습니다.")
         elif args.operation == "launch-codex":
             launch_codex()
         elif args.operation == "connect-site":

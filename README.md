@@ -34,15 +34,18 @@ python3 -B manage.py site-status
 
 ### macOS
 
-GUI를 종료한 상태에서 수집기를 설정하고 앱을 다시 엽니다.
+수집기를 설정한 뒤 평소처럼 Dock이나 응용 프로그램에서 Codex를 엽니다. 수집기는 로그인할 때 별도 프로세스로 시작합니다.
 
 ```sh
 python3 -B manage.py configure
 python3 -B manage.py enable-autostart
-python3 -B manage.py launch-codex
 ```
 
-기본 앱 위치와 다른 곳에 설치했으면 `CODEX_MONITOR_MAC_APP`에 앱 번들 경로를 지정합니다. 자동으로 찾은 CLI와 실제 GUI가 쓰는 CLI가 다르면 `CODEX_MONITOR_REAL_CODEX`에 실제 바이너리를 지정합니다.
+이전 버전에서 Chrome 연결이 끊겼다면 업데이트한 폴더에서 `enable-autostart`를 한 번 실행하세요. 수집기가 등록했던 실행 경로를 해제합니다. 이전 실행기로 열어 둔 Codex는 작업을 마친 뒤 완전히 종료하고 평소처럼 다시 엽니다. 기본 실행 경로로 이미 다시 연 앱은 그대로 사용할 수 있습니다.
+
+macOS에서는 Codex가 일반 진단 기록에 남긴 서버 모델 ID를 표시합니다. 그 기록이 없는 턴의 실제 모델은 **미보고**로 표시됩니다. 선택 모델, 첫 토큰 시간과 토큰/초는 별도로 수집합니다.
+
+`python3 -B manage.py launch-codex`로도 기본 앱을 열 수 있습니다. 앱을 다른 위치에 설치했다면 `CODEX_MONITOR_MAC_APP`에 앱 번들 경로를 지정합니다.
 
 ## 내 ChatGPT 계정의 Sites에 연결
 
@@ -59,7 +62,7 @@ get_site로 이 Site의 서비스 접속 키 siwc_bypass_bearer_token을 받아.
 
 별도 소스에서 node scripts/build-site.mjs로 빌드한 뒤 Sites 스킬의 소스 푸시·패키징 절차를 실행하고, 소유자 전용으로 배포해. 서비스 키와 쓰기 키는 도구 메모리와 가려진 표준 입력에서만 다뤄. 개인 Site 설정과 권한 변경은 별도 Site 소스와 Sites 도구에서 처리해.
 
-이 장비에 아직 수집기가 없으면 README의 해당 운영체제 설치 절차를 진행해. 배포가 끝나면 get_site에서 같은 Site의 실제 배포 URL과 서비스 키를 가져와 manage.py connect-site --url <배포 URL> --name <이 장비 이름> --token-stdin으로 연결해. 수집기 실행, 새 수신 시각, 공통 화면의 장비 이름을 확인해. GUI에서 짧은 요청을 실행하고 새 턴의 실제 응답 모델이 서버 응답 출처로 뜨는 것까지 확인해 줘.
+이 장비에 아직 수집기가 없으면 README의 해당 운영체제 설치 절차를 진행해. 배포가 끝나면 get_site에서 같은 Site의 실제 배포 URL과 서비스 키를 가져와 manage.py connect-site --url <배포 URL> --name <이 장비 이름> --token-stdin으로 연결해. 수집기 실행, 새 수신 시각, 공통 화면의 장비 이름을 확인해. GUI에서 짧은 요청을 실행하고 선택 모델과 측정 시각을 확인해. Windows와 Ubuntu에서는 새 턴의 실제 응답 모델과 그 출처까지 확인해. macOS에서는 Codex의 서버 모델 기록이 있는지 확인하고, 없으면 미보고라고 알려 줘.
 ```
 
 추가 장비에서는 같은 Sites의 배포 URL과 서비스 키를 사용합니다. `manage.py connect-site --url <내 Site 주소> --name <장비 이름>`은 가려진 입력으로 키를 받습니다. Codex 도구로 연결할 때는 `--token-stdin`으로 직접 전달합니다. 보는 사람은 해당 Site를 소유한 ChatGPT 계정으로 로그인합니다.
@@ -68,7 +71,7 @@ get_site로 이 Site의 서비스 접속 키 siwc_bypass_bearer_token을 받아.
 
 - **선택 모델**은 Codex의 요청 모델과 추론 강도입니다. **실제 응답 모델**은 서버가 보고한 모델 ID입니다. 요청한 모델과 다르면 해당 턴에 재라우팅으로 표시되며, 연결된 ID가 없으면 미보고로 표시됩니다.
 - **첫 토큰**은 Codex의 턴별 TTFT입니다. **토큰/초**는 서버가 보고한 출력 토큰을 각 모델 스트림의 관측된 생성 시간으로 나눈 추정치입니다.
-- 수집기는 응답에서 모델 ID와 응답 ID를 메모리에서 추출해 같은 장비의 사용량 기록에 연결합니다. Site에 보낼 때는 장비 이름, 채팅 제목, 가명 처리한 세션·턴 ID, 모델과 속도 측정값만 담습니다. Site는 장비별 최근 스냅샷을 보관합니다.
+- Windows와 Ubuntu의 수집기는 응답에서 모델 ID와 응답 ID를 메모리에서 추출해 같은 장비의 사용량 기록에 연결합니다. Site에 보낼 때는 장비 이름, 채팅 제목, 가명 처리한 세션·턴 ID, 모델과 속도 측정값만 담습니다. Site는 장비별 최근 스냅샷을 보관합니다.
 
 `manage.py site-status`는 장비 수집기 실행 여부와 마지막 Site 수신 시각을 보여줍니다. `manage.py local-dashboard off`로 로컬 웹 화면을 닫고 수집을 계속할 수 있습니다. `manage.py disconnect-site`로 장비의 Site 전송 연결을 해제합니다.
 

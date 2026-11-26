@@ -141,7 +141,9 @@ def start_local_monitor(runtime):
 
 def run(binary, args, runtime):
     command = [str(binary), *args]
-    if not app_server(args):
+    # Older macOS GUI launch shortcuts may still point here. Hand off immediately
+    # so the signed app-server runs as the desktop helper's direct child.
+    if sys.platform == "darwin" or not app_server(args):
         if os.name == "nt":
             return subprocess.call(command)
         os.execv(binary, command)
