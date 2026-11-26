@@ -93,5 +93,5 @@ class MacLauncherTests(unittest.TestCase):
         # A successful exec never returns to the Python process.
         with patch.object(os, "execv", side_effect=SystemExit) as execute:
             with self.assertRaises(SystemExit):
-                capture.run(binary, ["app-server"], manage.RUNTIME)
+                capture.run(binary, ["app-server"])
         execute.assert_called_once_with(binary, [str(binary), "app-server"])

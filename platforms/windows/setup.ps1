@@ -1,17 +1,10 @@
 param(
-    [Parameter(Mandatory = $true)][string] $CodexPath,
+    [string] $CodexPath, # Accepted by older install commands.
     [string] $GuiPath
 )
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-$codex = (Resolve-Path $CodexPath).Path
-if ([IO.Path]::GetExtension($codex) -ne ".exe") { throw "Provide the stock Windows codex.exe." }
-$version = & $codex --version
-if ($LASTEXITCODE -ne 0 -or ($version -join " ") -notmatch "^codex-cli ") {
-    throw "The specified executable did not report a Codex CLI version."
-}
-
 if (Get-Command py.exe -ErrorAction SilentlyContinue) {
     $python = & py.exe -3 -c "import sys; assert sys.version_info >= (3,11); print(sys.executable)"
 } else {
@@ -24,30 +17,23 @@ if ($LASTEXITCODE -ne 0 -or -not $locationJson) { throw "Could not resolve the c
 $runtime, $codexHome = ConvertFrom-Json $locationJson
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 $launcher = Join-Path $runtime "codex-monitor.exe"
-$prior = [Environment]::GetEnvironmentVariable("CODEX_CLI_PATH", "User")
-if ($prior -and $prior -ne $launcher -and $prior -ne $codex) {
-    throw "CODEX_CLI_PATH already points to another executable. Supply that stock CLI path explicitly."
-}
-$compiler = Join-Path $env:WINDIR "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
-if (-not (Test-Path $compiler)) { $compiler = Join-Path $env:WINDIR "Microsoft.NET/Framework/v4.0.30319/csc.exe" }
-if (-not (Test-Path $compiler)) { throw "The Windows .NET Framework C# compiler is required." }
-if ($GuiPath) { $GuiPath = (Resolve-Path $GuiPath).Path }
-
-$candidate = Join-Path $runtime "codex-monitor-build.exe"
-& $compiler /nologo /target:exe "/out:$candidate" (Join-Path $PSScriptRoot "Launcher.cs")
-if ($LASTEXITCODE -ne 0) { throw "Could not build the Codex launcher." }
-try {
-    [IO.File]::WriteAllLines((Join-Path $runtime "launcher-paths.txt"), [string[]]@(
-        $python, (Join-Path $repo "capture.py"), $codex
-    ), (New-Object System.Text.UTF8Encoding($false)))
-    $checkedVersion = & $candidate --version
-    if ($LASTEXITCODE -ne 0 -or ($checkedVersion -join " ") -notmatch "^codex-cli ") {
-        throw "The new launcher did not start the stock Codex executable."
+$current = [Environment]::GetEnvironmentVariable("CODEX_CLI_PATH", "User")
+if ($current -eq $launcher) {
+    $backup = Join-Path $runtime "prior-codex-cli-path.txt"
+    $restored = $null
+    if (Test-Path -LiteralPath $backup) {
+        $saved = [IO.File]::ReadAllText($backup).Trim()
+        if ($saved -and $saved -ne $launcher) { $restored = $saved }
     }
-    Move-Item -Path $candidate -Destination $launcher -Force
-} finally {
-    if (Test-Path $candidate) { Remove-Item -LiteralPath $candidate }
+    [Environment]::SetEnvironmentVariable("CODEX_CLI_PATH", $restored, "User")
 }
+if ($env:CODEX_CLI_PATH -eq $launcher) {
+    $env:CODEX_CLI_PATH = [Environment]::GetEnvironmentVariable("CODEX_CLI_PATH", "User")
+    if (-not $env:CODEX_CLI_PATH) {
+        $env:CODEX_CLI_PATH = [Environment]::GetEnvironmentVariable("CODEX_CLI_PATH", "Machine")
+    }
+}
+if ($GuiPath) { $GuiPath = (Resolve-Path $GuiPath).Path }
 
 & $python -B (Join-Path $repo "manage.py") configure
 if ($LASTEXITCODE -ne 0) { throw "Could not configure the local collector." }
@@ -78,11 +64,6 @@ for ($attempt = 0; $attempt -lt 25; $attempt++) {
 }
 if (-not $running) { throw "The logon task was registered. Check the scheduled task and server.log in $runtime." }
 
-if ($prior -ne $launcher) {
-    [IO.File]::WriteAllText((Join-Path $runtime "prior-codex-cli-path.txt"), [string]$prior)
-}
-[Environment]::SetEnvironmentVariable("CODEX_CLI_PATH", $launcher, "User")
-$env:CODEX_CLI_PATH = $launcher
 Write-Output "Collector configured for Windows-native Codex. Restart the GUI to load it."
 Write-Output "Registered and started the logon task $taskName."
 if ($GuiPath) { Start-Process -FilePath $GuiPath }

@@ -13,7 +13,6 @@ const ui = {
   search: byId("search"),
   detail: byId("detail"),
   detailHeading: byId("detail-heading"),
-  routingHistory: byId("routing-history"),
   turnHistory: byId("turn-history"),
 };
 const timeFormat = new Intl.DateTimeFormat("ko-KR", { timeStyle: "medium", hour12: false });
@@ -64,15 +63,6 @@ function model(slug, effort) {
   return `<span class="model">${escapeText(slug)}</span>${effort ? `<span class="subline">${escapeText(effort)}</span>` : ""}`;
 }
 
-function served(turn, routes) {
-  if (!turn?.served.length) return '<span class="unknown" title="이 턴에 연결된 서버 모델 ID가 없습니다">미보고</span>';
-  const routed = new Set(routes.filter((route) => route.turn === turn.id).map((route) => route.to));
-  return turn.served.map((slug) => {
-    const source = turn.servedSources?.[slug] === "response" ? "서버 응답 본문에서 확인" : "Codex 모델 로그에서 확인";
-    return `<span class="model${routed.has(slug) ? " routed" : ""}" title="${source}">${escapeText(slug)}</span>`;
-  }).join("") + (routed.size ? '<span class="subline">재라우팅</span>' : "");
-}
-
 function stateBadge(value) {
   const [label, kind] = status[value] ?? ["기록됨", "idle"];
   return `<span class="state ${kind}"><i aria-hidden="true"></i>${label}</span>`;
@@ -106,7 +96,6 @@ function render() {
   const middleRate = median(measurements.map((item) => item.rate).filter((value) => value != null));
   const active = sessions.filter((session) => session.status === "inProgress").length;
   byId("active-count").textContent = active;
-  byId("route-count").textContent = sessions.reduce((total, session) => total + session.routes.length, 0);
   byId("ttft-summary").textContent = middleDelay == null ? "—" : twoDecimals.format(middleDelay / 1000);
   byId("rate-summary").textContent = middleRate == null ? "—" : oneDecimal.format(middleRate);
   ui.last.textContent = snapshot.updated ? `${timeFormat.format(snapshot.updated)} 갱신` : "";
@@ -127,16 +116,13 @@ function render() {
   const word = ui.search.value.toLowerCase().trim();
   const shown = sessions.filter((session) => {
     if (filter === "active" && session.status !== "inProgress") return false;
-    if (filter === "routed" && !session.routes.length) return false;
-    const routeSlugs = session.routes.flatMap(({ from, to }) => [from, to]);
-    const fields = [session.title, session.project, session.model, ...routeSlugs, ...(session.latest?.served ?? [])];
+    const fields = [session.title, session.project, session.model, session.latest?.model];
     return !word || fields.filter(Boolean).join(" ").toLowerCase().includes(word);
   });
   ui.count.textContent = shown.length === sessions.length ? String(sessions.length) : `${shown.length} / ${sessions.length}`;
   ui.empty.hidden = Boolean(shown.length);
   ui.empty.textContent = word ? "검색과 일치하는 세션이 없습니다."
-    : filter === "routed" ? "최근 7일에 기록된 재라우팅이 없습니다."
-      : filter === "active" ? "진행 중인 세션이 없습니다." : "표시할 Codex 세션이 없습니다.";
+    : filter === "active" ? "진행 중인 세션이 없습니다." : "표시할 Codex 세션이 없습니다.";
   const rows = shown.map((session) => {
     const turn = session.latest;
     const subtitles = [session.project, time(session.updated)].filter(Boolean).join(" · ");
@@ -145,7 +131,6 @@ function render() {
         aria-expanded="${session.id === selected}" aria-controls="detail">
         <span class="title">${escapeText(session.title)}</span><span class="subline">${escapeText(subtitles)}</span></button></td>
       <td>${model(session.model, session.effort)}</td>
-      <td>${served(turn, session.routes)}</td>
       <td>${metric(turn?.ttft, "초", true)}</td>
       <td>${metric(turn?.rate, "")}</td>
       <td>${stateBadge(session.status)}</td>
@@ -160,26 +145,18 @@ function render() {
 }
 
 function renderDetail(data) {
-  const routeHTML = data.routes.length
-    ? `<ol class="route-list">${data.routes.map((route) => `<li>
-        <div class="route-line mono">${escapeText(route.from)} → ${escapeText(route.to)}</div>
-        <span class="subline">${escapeText(time(route.at))}${route.source === "response" ? " · 서버 응답" : ""}${route.turn ? "" : " · 턴 미확인"}</span>
-      </li>`).join("")}</ol>`
-    : "<p>기록된 재라우팅이 없습니다.</p>";
   const turnHTML = data.turns.length ? `<table aria-label="최근 턴의 모델과 성능">
-    <thead><tr><th scope="col">시작</th><th scope="col">요청 모델</th><th scope="col">응답 모델</th>
+    <thead><tr><th scope="col">시작</th><th scope="col">선택 모델</th>
     <th scope="col">첫 토큰</th><th scope="col">토큰/초</th></tr></thead>
     <tbody>${data.turns.map((turn) => `<tr>
       <td><span>${escapeText(time(turn.started))}</span><span class="subline">${stateBadge(turn.status)}</span></td>
-      <td>${model(turn.model, turn.effort)}</td><td>${served(turn, data.routes)}</td>
+      <td>${model(turn.model, turn.effort)}</td>
       <td>${metric(turn.ttft, "초", true)}</td><td>${metric(turn.rate, "")}
         ${turn.sample ? `<span class="subline">${oneDecimal.format(turn.sample.tokens)}토큰 · ${turn.sample.count}스트림</span>` : ""}</td>
     </tr>`).join("")}</tbody></table>` : "<p>읽을 수 있는 턴 기록이 없습니다.</p>";
-  const signature = routeHTML + turnHTML;
-  if (signature !== lastDetail) {
-    ui.routingHistory.innerHTML = routeHTML;
+  if (turnHTML !== lastDetail) {
     ui.turnHistory.innerHTML = turnHTML;
-    lastDetail = signature;
+    lastDetail = turnHTML;
   }
 }
 
@@ -236,8 +213,7 @@ ui.sessions.addEventListener("click", (event) => {
   lastDetail = "";
   ui.detail.hidden = false;
   ui.detailHeading.textContent = session.title;
-  ui.routingHistory.textContent = "내역을 불러오는 중";
-  ui.turnHistory.textContent = "";
+  ui.turnHistory.textContent = "최근 턴을 불러오는 중";
   render();
   ui.detailHeading.focus({ preventScroll: true });
   ui.detail.scrollIntoView({ block: "nearest", behavior: "instant" });

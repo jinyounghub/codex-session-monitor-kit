@@ -4,7 +4,6 @@ const STATES = new Set(["inProgress", "completed", "interrupted", "failed", "idl
 const INGEST_LIMIT = 700 * 1024;
 const DEVICE_LIMIT = 25;
 const DEVICE_TIMEOUT = 120_000;
-const WEEK = 604_800_000;
 const HEADERS = {
   "Cache-Control": "no-store",
   "Content-Security-Policy": "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
@@ -36,26 +35,14 @@ function values(value, limit, clean) {
 
 function turn(value) {
   if (!object(value) || !match(value.id, ID) || !STATES.has(value.status)) return null;
-  const served = values(value.served, 12, (name) => match(name, MODEL));
   return {
     id: value.id, status: value.status,
     started: metric(value.started), completed: metric(value.completed), duration: metric(value.duration),
     model: match(value.model, MODEL), effort: match(value.effort, MODEL),
-    served, servedSources: Object.fromEntries(served.map((name) => [
-      name, value.servedSources?.[name] === "response" ? "response" : "codex_log",
-    ])),
     ttft: metric(value.ttft), rate: metric(value.rate, 1_000_000),
     sample: object(value.sample) ? {
       tokens: metric(value.sample.tokens), count: metric(value.sample.count),
     } : null,
-  };
-}
-
-function route(value) {
-  if (!object(value) || !match(value.from, MODEL) || !match(value.to, MODEL) || !metric(value.at)) return null;
-  return {
-    from: value.from, to: value.to, at: value.at, turn: match(value.turn, ID),
-    source: value.source === "response" ? "response" : "codex_log",
   };
 }
 
@@ -66,7 +53,7 @@ function session(value) {
     id: value.id, title: Array.from(title).slice(0, 240).join("") || null,
     model: match(value.model, MODEL), effort: match(value.effort, MODEL),
     status: value.status, updated: value.updated, latest: turn(value.latest), timing: turn(value.timing),
-    routes: values(value.routes, 24, route), turns: values(value.turns, 12, turn),
+    turns: values(value.turns, 12, turn),
   };
 }
 
@@ -144,21 +131,20 @@ async function getDevices(env) {
   ).all();
   return results.map((row) => {
     const payload = JSON.parse(row.payload);
+    const sessions = values(payload.sessions, 80, session);
     const device = {
       id: row.device_id, label: row.label, receivedAt: row.received_at,
-      online: Date.now() - row.received_at < DEVICE_TIMEOUT, sessions: payload.sessions.length,
+      online: Date.now() - row.received_at < DEVICE_TIMEOUT, sessions: sessions.length,
     };
-    return { device, ...payload };
+    return { device, sessions, telemetryAt: metric(payload.telemetryAt) };
   });
 }
 
 async function overview(env) {
   const devices = await getDevices(env);
-  const cutoff = Date.now() - WEEK;
   const sessions = devices.flatMap(({ device, sessions }) => sessions.map(({ turns, ...s }) => ({
     ...s, title: s.title || "제목 없는 세션", project: device.label, deviceId: device.id,
     status: !device.online && s.status === "inProgress" ? "idle" : s.status,
-    routes: s.routes.filter((item) => item.at >= cutoff),
   }))).sort((a, b) => b.updated - a.updated);
   return json({
     sessions, devices: devices.map(({ device }) => device), updated: Date.now(),
@@ -170,7 +156,7 @@ async function detail(env, id) {
   if (!match(id, ID)) return json({ error: "Unknown session" }, 404);
   for (const { sessions } of await getDevices(env)) {
     const result = sessions.find((item) => item.id === id);
-    if (result) return json({ turns: result.turns, routes: result.routes });
+    if (result) return json({ turns: result.turns });
   }
   return json({ error: "Unknown session" }, 404);
 }

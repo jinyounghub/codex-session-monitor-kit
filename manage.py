@@ -339,7 +339,6 @@ def main():
     choices.add_parser("configure")
     choices.add_parser("disconnect")
     choices.add_parser("stop")
-    choices.add_parser("enable-model-capture")
     choices.add_parser("launch-codex")
     connection = choices.add_parser("connect-site")
     connection.add_argument("--url", required=True)
@@ -372,11 +371,6 @@ def main():
             restore_mac_cli()
         elif args.operation == "stop":
             stop()
-        elif args.operation == "enable-model-capture":
-            if sys.platform != "darwin":
-                raise RuntimeError("이 장비의 운영체제 설치 안내를 확인하세요.")
-            restore_mac_cli()
-            print("macOS에서는 기본 Codex 앱을 열면 수집기가 Codex의 측정 기록을 읽습니다.")
         elif args.operation == "launch-codex":
             launch_codex()
         elif args.operation == "connect-site":

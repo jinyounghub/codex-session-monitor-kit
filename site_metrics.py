@@ -112,8 +112,6 @@ def site_report(snapshot, details, config, now):
             "status", "started", "completed", "duration", "model", "effort", "ttft", "rate",
         )}
         output["id"] = anonymize(value["id"])
-        output["served"] = value["served"][:12]
-        output["servedSources"] = {slug: value.get("servedSources", {}).get(slug) for slug in output["served"]}
         if value.get("sample"):
             output["sample"] = {key: value["sample"].get(key) for key in ("tokens", "count")}
         return output
@@ -129,10 +127,6 @@ def site_report(snapshot, details, config, now):
         row["latest"] = turn(session["latest"])
         row["timing"] = turn(session.get("timing"))
         row["turns"] = [turn(value) for value in details.get(session["id"], (session["latest"],))[:12]]
-        row["routes"] = [{
-            "at": route["at"], "from": route["from"], "to": route["to"], "source": route.get("source"),
-            "turn": anonymize(route["turn"]) if route.get("turn") else None,
-        } for route in session["routes"] if route["at"] >= cutoff][:24]
         items.append(row)
         if len(items) >= 80:
             break

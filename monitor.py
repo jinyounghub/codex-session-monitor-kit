@@ -17,21 +17,20 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from response_models import RolloutLinks, events_from_responses, model_name, prepare_store
 from runtime_paths import CODEX_HOME, LOCAL_DASHBOARD_OFF
 from site_metrics import sync_forever
 
 
 ASSETS = Path(__file__).resolve().parent / "dashboard"
 ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
-ROUTE_LOG = re.compile(
-    r"\bserver reported model ([\w.:/-]+) "
-    r"(?:\(matches requested model\)|while requested model was ([\w.:/-]+))"
-)
-LOG_TURN = re.compile(r"\b(?:turn\.id|turn_id)=\"?(" + ID.pattern + r")", re.I)
+MODEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,119}")
 MAX_TURNS = 24
 MAX_SESSIONS = 120
 MAX_OTLP_BYTES = 12 * 1024 * 1024
+
+
+def model_name(value):
+    return value if isinstance(value, str) and MODEL.fullmatch(value) else None
 
 
 def identifier(value):
@@ -191,29 +190,13 @@ def assigned_streams(streams, windows):
 
 
 def annotate(turns, events, receiving):
-    routes = []
     first_tokens = {}
     for event in events:
-        if event["kind"] in ("ttft", "model"):
+        if event["kind"] == "ttft":
             turn = in_turn(event, turns)
-            if event["kind"] == "ttft" and turn:
-                if turn["id"] not in first_tokens:
-                    first_tokens[turn["id"]] = event
-                    turn["ttft"] = event["delay"]
-            elif event["kind"] == "model":
-                observed = {
-                    "at": event["at"], "from": event.get("from"),
-                    "to": event["model"], "turn": turn["id"] if turn else event.get("turn"),
-                    "source": "codex_log",
-                }
-                if event.get("from") and event["from"].casefold() != event["model"].casefold():
-                    routes.append(observed)
-                if turn:
-                    if event.get("from"):
-                        turn["model"] = event["from"]
-                    if event["model"] not in turn["served"]:
-                        turn["served"].append(event["model"])
-                    turn["servedSources"][event["model"]] = "codex_log"
+            if turn and turn["id"] not in first_tokens:
+                first_tokens[turn["id"]] = event
+                turn["ttft"] = event["delay"]
     windows = [e for e in events if e["kind"] == "sampling"]
     streams = [e for e in events if e["kind"] == "stream"]
     stream_by_call = assigned_streams(streams, windows)
@@ -249,26 +232,6 @@ def annotate(turns, events, receiving):
         if summary:
             turn["rate"] = round(1000 * summary["tokens"] / summary["ms"], 1)
             turn["sample"] = summary
-    body_routes = []
-    by_id = {turn["id"]: turn for turn in turns}
-    for event in events:
-        if event["kind"] != "response_model":
-            continue
-        turn = by_id.get(event["turn"])
-        actual = event["model"]
-        if turn:
-            if actual not in turn["served"]:
-                turn["served"].append(actual)
-            turn["servedSources"][actual] = "response"
-        requested = event.get("from") or (turn["model"] if turn else None)
-        if requested and requested.casefold() != actual.casefold():
-            body_routes.append({
-                "at": event["at"], "from": requested, "to": actual,
-                "turn": event["turn"], "source": "response",
-            })
-    confirmed = {(r["turn"], r["from"].casefold(), r["to"].casefold()) for r in body_routes}
-    routes = [r for r in routes if (r["turn"], r["from"].casefold(), r["to"].casefold()) not in confirmed]
-    return sorted(routes + body_routes, key=lambda route: route["at"], reverse=True)
 
 
 class Monitor:
@@ -279,11 +242,8 @@ class Monitor:
         self.data_path = self.data_dir / "measurements.sqlite"
         self.state_path = newest_database(self.codex_home, "state")
         self.history_path = newest_database(self.codex_home, "thread_history")
-        self.logs_path = newest_database(self.codex_home, "logs")
-        self.log_cursor = None
         self.context_cache = {}
         self.context_lock = threading.Lock()
-        self.response_links = RolloutLinks(self.codex_home)
         self.snapshot = None
         self.recent_turns = {}
         self.error = None
@@ -297,7 +257,6 @@ class Monitor:
                 CREATE INDEX IF NOT EXISTS event_thread_at ON event(thread, at);
                 CREATE INDEX IF NOT EXISTS event_kind_at ON event(kind, at);
             """)
-            prepare_store(db)
 
     def measurement_db(self):
         return sqlite3.connect(self.data_path, timeout=2)
@@ -311,41 +270,6 @@ class Monitor:
         if rows:
             with closing(self.measurement_db()) as db, db:
                 db.executemany("INSERT OR IGNORE INTO event VALUES (?, ?, ?, ?, ?)", rows)
-
-    def monitor_logs(self):
-        if self.logs_path is None:
-            return
-        with closing(read_db(self.logs_path)) as db:
-            maximum = db.execute("SELECT max(id) FROM logs").fetchone()[0] or 0
-            cursor = self.log_cursor
-            if cursor is None or maximum < cursor:
-                cursor = max(0, maximum - 80_000)
-            end = min(maximum, cursor + 40_000)
-            if end <= cursor:
-                return
-            rows = db.execute("""
-                SELECT ts, ts_nanos, thread_id, feedback_log_body FROM logs
-                WHERE id > ? AND id <= ? AND target LIKE 'codex_core::session%'
-                AND instr(feedback_log_body, 'server reported model ') > 0
-            """, (cursor, end)).fetchall()
-        events = []
-        for row in rows:
-            thread = identifier(row["thread_id"])
-            message = row["feedback_log_body"]
-            match = ROUTE_LOG.search(message)
-            if not thread or not match:
-                continue
-            actual, requested = map(model_name, match.groups())
-            if not actual:
-                continue
-            turn = LOG_TURN.search(message)
-            events.append({
-                "kind": "model", "thread": thread, "turn": identifier(turn[1]) if turn else None,
-                "at": row["ts"] * 1000 + (row["ts_nanos"] % 1_000_000_000) // 1_000_000,
-                "from": requested, "model": actual,
-            })
-        self.write_events(events)
-        self.log_cursor = end
 
     def read_context(self, filename, turn_id, offset):
         if offset is None or not filename:
@@ -406,20 +330,16 @@ class Monitor:
                 "started": row["started_at"] * 1000 if row["started_at"] else None,
                 "completed": row["completed_at"] * 1000 if row["completed_at"] else None,
                 "duration": row["duration_ms"], "model": selected, "effort": effort,
-                "served": [], "servedSources": {}, "ttft": None, "rate": None, "sample": None,
+                "ttft": None, "rate": None, "sample": None,
             })
         return turns
 
     def collect(self):
-        self.monitor_logs()
         if self.state_path is None:
             self.state_path = newest_database(self.codex_home, "state")
         if self.history_path is None:
             self.history_path = newest_database(self.codex_home, "thread_history")
-        if self.logs_path is None:
-            self.logs_path = newest_database(self.codex_home, "logs")
         sessions = []
-        rollout_sessions = []
         if self.state_path:
             with closing(read_db(self.state_path)) as db:
                 sessions = db.execute("""
@@ -428,29 +348,28 @@ class Monitor:
                     FROM threads WHERE archived = 0
                     ORDER BY recency_at_ms DESC LIMIT ?
                 """, (MAX_SESSIONS,)).fetchall()
-                rollout_sessions = db.execute("SELECT id, rollout_path FROM threads WHERE rollout_path != ''").fetchall()
         history_db = read_db(self.history_path) if self.history_path else None
         result = []
         recent_turns = {}
         try:
             with closing(self.measurement_db()) as db:
-                self.response_links.link(db, history_db, rollout_sessions, self.read_context)
                 cutoff = now_ms() - 7 * 24 * 60 * 60 * 1000
                 by_thread = defaultdict(list)
                 receiving = {}
-                for kind, encoded in db.execute("SELECT kind, detail FROM event WHERE at >= ? ORDER BY at", (cutoff,)):
+                for kind, encoded in db.execute("""
+                    SELECT kind, detail FROM event
+                    WHERE at >= ? AND kind IN ('ttft', 'stream', 'sampling', 'receiving') ORDER BY at
+                """, (cutoff,)):
                     event = json.loads(encoded)
                     if kind == "receiving":
                         receiving[event["call"]] = event
                     else:
                         by_thread[event["thread"]].append(event)
-                for event in events_from_responses(db, cutoff=cutoff):
-                    by_thread[event["thread"]].append(event)
                 last_timing = db.execute("SELECT max(at) FROM event WHERE kind='ttft'").fetchone()[0]
             for session in sessions:
                 events = by_thread.get(session["id"], [])
                 turns = self.turn_list(history_db, session, recent_only=not bool(events))
-                routes = annotate(turns, events, receiving)
+                annotate(turns, events, receiving)
                 recent_turns[session["id"]] = turns
                 latest = turns[0] if turns else None
                 result.append({
@@ -461,7 +380,6 @@ class Monitor:
                     "updated": session["updated"],
                     "latest": latest,
                     "timing": next((turn for turn in turns if turn["ttft"] is not None or turn["rate"] is not None), None),
-                    "routes": routes,
                 })
         finally:
             if history_db:
@@ -480,9 +398,8 @@ class Monitor:
             turns = self.turn_list(db, session)
         with closing(self.measurement_db()) as db:
             events = [json.loads(row[0]) for row in db.execute(
-                "SELECT detail FROM event WHERE thread = ? ORDER BY at", (thread_id,)
+                "SELECT detail FROM event WHERE thread = ? AND kind IN ('ttft', 'stream', 'sampling') ORDER BY at", (thread_id,)
             )]
-            events.extend(events_from_responses(db, thread=thread_id))
             calls = {event["call"] for event in events if event["kind"] == "sampling"}
             receiving = {}
             if calls:
@@ -490,7 +407,8 @@ class Monitor:
                     event = json.loads(row[0])
                     if event["call"] in calls:
                         receiving[event["call"]] = event
-        return {"turns": turns, "routes": annotate(turns, events, receiving)}
+        annotate(turns, events, receiving)
+        return {"turns": turns}
 
     def poll(self):
         while True:
